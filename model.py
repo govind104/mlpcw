@@ -620,6 +620,8 @@ def main():
             print("\nWarning: Only one class present in predictions")
             print(f"Fraud Cases in Test Set: {(y_true == 1).sum()}/{len(y_true)}")
             print(y_pred)
+            end_time = time.time()
+            print(f"Training completed in {time.time() - start_time:.2f} seconds.")
             return
 
         # Safe metric calculation
