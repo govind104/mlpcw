@@ -51,13 +51,13 @@ def load_data(sample_frac=0.3):
 # 2. Feature Engineering (Unchanged)
 def preprocess_features(df, scaler=None, pca=None, fit_mode=False):
     """Process features with isolation between train/val/test data.
-    
+
     Args:
         df: Input DataFrame (already split into train/val/test)
         scaler: Pre-fitted StandardScaler (required if fit_mode=False)
         pca: Pre-fitted PCA (required if fit_mode=False)
         fit_mode: True for training data (fit new scalers/PCA)
-    
+
     Returns:
         Processed features tensor + scaler/pca (if fit_mode=True)
     """
@@ -116,7 +116,7 @@ def build_semantic_similarity_edges(features, original_indices, threshold=0.8, b
             # Map subset index to original dataset index
             subset_src = i + idx_in_batch
             original_src = original_indices[subset_src].item()
-            
+
             # Filter valid neighbors within threshold
             valid = sim_row > threshold
             for subset_dst in nbr_row[valid]:
@@ -172,10 +172,11 @@ class SubgraphPolicy(nn.Module):
         return F.softmax(logits, dim=-1), logits
 
 class RLAgent:
-    def __init__(self, feat_dim):
+    def __init__(self, feat_dim, global_to_local=None):
         self.policy = SubgraphPolicy(feat_dim)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
         self.mces = LiteMCES()
+        self.global_to_local = global_to_local
 
     def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
         """Batched RL training with average loss tracking"""
@@ -199,7 +200,8 @@ class RLAgent:
             rewards = []
             for node, action in zip(subset, actions):
                 method_nodes = self.mces._execute_method(node.item(), action)
-                method_nodes_local = global_to_local[torch.tensor(method_nodes, device=device)]
+                method_nodes_tensor = torch.tensor(method_nodes, dtype=torch.long, device=device)
+                method_nodes_local = self.global_to_local[method_nodes_tensor]
                 valid = method_nodes_local != -1
                 if valid.any():
                     reward = torch.log1p(y_labels[method_nodes_local[valid]].sum().float())
@@ -415,26 +417,28 @@ class FocalLoss(nn.Module):
 def main():
     start_time = time.time()
     # 1. Data Loading & Preprocessing
-    df = load_data(sample_frac=0.05)
+    df = load_data(sample_frac=0.01)
     if df.empty:
         print("No data loaded - check file paths")
         return
 
     # Stratified split on raw data (before preprocessing)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     train_idx, temp_idx = train_test_split(
-        df.index, 
-        test_size=0.4, 
-        stratify=df['isFraud'], 
+        df.index,
+        test_size=0.4,
+        stratify=df['isFraud'],
         random_state=42
     )
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     train_idx_tensor = torch.tensor(train_idx, device=device)
     global_to_local = torch.full((df.shape[0],), -1, dtype=torch.long, device=device)
     global_to_local[train_idx_tensor] = torch.arange(len(train_idx), device=device)
+
     val_idx, test_idx = train_test_split(
-        temp_idx, 
-        test_size=0.5, 
-        stratify=df.loc[temp_idx, 'isFraud'], 
+        temp_idx,
+        test_size=0.5,
+        stratify=df.loc[temp_idx, 'isFraud'],
         random_state=42
     )
 
@@ -446,30 +450,30 @@ def main():
 
     # Preprocess TRAINING data (fit scalers/PCA)
     train_features, scaler, pca = preprocess_features(
-        df.loc[train_idx], 
+        df.loc[train_idx],
         fit_mode=True
     )
-    
+
     # Preprocess VAL/TEST data (use training-fitted scalers/PCA)
     val_features = preprocess_features(
-        df.loc[val_idx], 
-        scaler=scaler, 
-        pca=pca, 
+        df.loc[val_idx],
+        scaler=scaler,
+        pca=pca,
         fit_mode=False
     )
     test_features = preprocess_features(
-        df.loc[test_idx], 
-        scaler=scaler, 
-        pca=pca, 
+        df.loc[test_idx],
+        scaler=scaler,
+        pca=pca,
         fit_mode=False
     )
-    
+
     # Combine features into full tensor (preserve original indices)
     features = torch.zeros((len(df), train_features.shape[1]), dtype=torch.float32)
     features[train_idx] = train_features
     features[val_idx] = val_features
     features[test_idx] = test_features
-    
+
     features = features.to(device)
     if features.shape[0] == 0:
         print("Feature engineering failed")
@@ -478,7 +482,7 @@ def main():
     ## 2. FAISS-based Edge Construction
     train_features = features[train_idx]  # Shape: [num_train_nodes, feature_dim]
     original_indices = torch.tensor(train_idx, dtype=torch.long).to(device)  # Maps subset idx → original idx
-    
+
     # Build edges ONLY within training subgraph
     edge_index = build_semantic_similarity_edges(
         features=train_features,
@@ -516,7 +520,7 @@ def main():
 
     # 6. RL Subgraph Enhancement
     print("Started MCES")
-    rl_agent = RLAgent(train_features.size(1))
+    rl_agent = RLAgent(train_features.size(1), global_to_local=global_to_local)
     rl_agent.policy.to(device)
 
     mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2)
