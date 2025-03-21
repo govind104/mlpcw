@@ -199,7 +199,13 @@ class RLAgent:
             rewards = []
             for node, action in zip(subset, actions):
                 method_nodes = self.mces._execute_method(node.item(), action)
-                reward = torch.log1p(y_labels[method_nodes].sum().float())  # Normalized reward
+                method_nodes_local = global_to_local[torch.tensor(method_nodes, device=device)]
+                valid = method_nodes_local != -1
+                if valid.any():
+                    reward = torch.log1p(y_labels[method_nodes_local[valid]].sum().float())
+                else:
+                    reward = torch.tensor(0.0, device=device)
+
                 rewards.append(reward)
 
             rewards = torch.stack(rewards)
@@ -415,12 +421,16 @@ def main():
         return
 
     # Stratified split on raw data (before preprocessing)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     train_idx, temp_idx = train_test_split(
         df.index, 
         test_size=0.4, 
         stratify=df['isFraud'], 
         random_state=42
     )
+    train_idx_tensor = torch.tensor(train_idx, device=device)
+    global_to_local = torch.full((df.shape[0],), -1, dtype=torch.long, device=device)
+    global_to_local[train_idx_tensor] = torch.arange(len(train_idx), device=device)
     val_idx, test_idx = train_test_split(
         temp_idx, 
         test_size=0.5, 
@@ -460,8 +470,6 @@ def main():
     features[val_idx] = val_features
     features[test_idx] = test_features
     
-    # Move to device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     features = features.to(device)
     if features.shape[0] == 0:
         print("Feature engineering failed")
