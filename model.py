@@ -91,7 +91,7 @@ def build_semantic_similarity_edges(features, threshold=0.8, batch_size=8192):
 
     for i in range(0, num_nodes, batch_size):
         batch = features_np[i:i+batch_size]
-        similarities, neighbors = index.search(batch, 100)  # Top 100 neighbors
+        similarities, neighbors = index.search(batch, 75)  # Top 75 neighbors
 
         for idx_in_batch, (sim_row, nbr_row) in enumerate(zip(similarities, neighbors)):
             src = i + idx_in_batch
@@ -153,7 +153,7 @@ class RLAgent:
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
         self.mces = LiteMCES()
 
-    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=100):
+    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=60):
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
@@ -175,7 +175,7 @@ class RLAgent:
             rewards = []
             for node, action in zip(subset, actions):
                 method_nodes = self.mces._execute_method(node.item(), action)
-                reward = y_labels[method_nodes].float().mean()  # Normalized reward
+                reward = torch.log1p(y_labels[method_nodes].sum().float())  # Normalized reward
                 rewards.append(reward)
             
             rewards = torch.stack(rewards)
@@ -355,28 +355,34 @@ class LiteMCES:
 # ----------------------------------------------------------------------------------------------------
 # 7. GNN Model (Unchanged)
 class FraudGNN(nn.Module):
-    def __init__(self, in_channels, hidden=128, out=2, dropout=0.6):
+    def __init__(self, in_channels, hidden=64, out=2, dropout=0.4):
         super().__init__()
         self.conv1 = GCNConv(in_channels, hidden)
         self.bn1 = nn.BatchNorm1d(hidden)
-        self.conv2 = GCNConv(hidden, 64)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.conv3 = GCNConv(64, 32)
-        self.conv4 = GCNConv(32, out)
+        self.conv2 = GCNConv(hidden, out)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, edge_index):
         x = F.relu(self.bn1(self.conv1(x, edge_index)))
         x = self.dropout(x)
-        x = F.relu(self.bn2(self.conv2(x, edge_index)))
-        x = self.dropout(x)
-        x = F.relu(self.conv3(x, edge_index))
-        x = self.dropout(x)
-        x = self.conv4(x, edge_index)
+        x = self.conv2(x, edge_index)
         return F.log_softmax(x, dim=1)
 
 # ----------------------------------------------------------------------------------------------------
-# 8. Modified Training Pipeline
+# 8. Focal Loss
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        return (self.alpha * (1-pt)**self.gamma * ce_loss).mean()
+
+# ----------------------------------------------------------------------------------------------------
+# 9. Modified Training Pipeline
 def main():
   # 1. Data Loading & Preprocessing
     df = load_data(sample_frac=0.01)
@@ -492,8 +498,8 @@ def main():
 
     # Training with class weights
     model = FraudGNN(features.size(1)).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-    criterion = nn.NLLLoss(weight=class_weights)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
+    criterion = FocalLoss(alpha=0.25, gamma=2)
 
     # 10. Training with Early Stopping
     best_val_loss = float('inf')
