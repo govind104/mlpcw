@@ -10,7 +10,6 @@ from sklearn.metrics import recall_score, f1_score, confusion_matrix
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
-from collections import defaultdict
 import os
 import matplotlib.pyplot as plt  # Added import
 import networkx as nx  # Added import
