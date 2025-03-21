@@ -385,7 +385,7 @@ class FocalLoss(nn.Module):
 # 9. Modified Training Pipeline
 def main():
   # 1. Data Loading & Preprocessing
-    df = load_data(sample_frac=0.01)
+    df = load_data(sample_frac=0.1)
     if df.empty:
         print("No data loaded - check file paths")
         return
