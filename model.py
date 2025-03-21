@@ -511,7 +511,7 @@ def main():
     rl_agent = RLAgent(train_features.size(1))
     rl_agent.policy.to(device)
 
-    mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2).to(device)
+    mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2)
     enhanced_edges = mces.enhance_subgraph(
         edge_index,
         fraud_nodes=fraud_nodes_train_local,
