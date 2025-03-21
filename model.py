@@ -4,6 +4,7 @@ import torch
 import faiss
 import torch.nn as nn
 import torch.nn.functional as F
+import time
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
 from sklearn.metrics import recall_score, f1_score, confusion_matrix
@@ -11,6 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
 import os
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 import matplotlib.pyplot as plt  # Added import
 import networkx as nx  # Added import
 
@@ -47,36 +49,54 @@ def load_data(sample_frac=0.3):
 
 # ----------------------------------------------------------------------------------------------------
 # 2. Feature Engineering (Unchanged)
-def preprocess_features(df):
+def preprocess_features(df, scaler=None, pca=None, fit_mode=False):
+    """Process features with isolation between train/val/test data.
+    
+    Args:
+        df: Input DataFrame (already split into train/val/test)
+        scaler: Pre-fitted StandardScaler (required if fit_mode=False)
+        pca: Pre-fitted PCA (required if fit_mode=False)
+        fit_mode: True for training data (fit new scalers/PCA)
+    
+    Returns:
+        Processed features tensor + scaler/pca (if fit_mode=True)
+    """
+    df = df.copy()
     df['P_emaildomain'] = df['P_emaildomain'].fillna('unknown')
     df['card4'] = df['card4'].fillna('unknown')
 
     # Convert TransactionDT to hourly bins
     df['TransactionHour'] = (df['TransactionDT'] // 3600) % 24
-
-    # Time since last transaction (global)
-    df = df.sort_values('TransactionDT')
+    df = df.sort_values('TransactionDT')  # Time since last transaction (global)
     df['TimeSinceLast'] = df['TransactionDT'].diff().fillna(0)
 
     # 3. Numerical features (now includes temporal features)
     num_cols = ['TransactionAmt', 'C1', 'C2', 'C3',
                 'TransactionHour', 'TimeSinceLast']
     num_features = df[num_cols].fillna(0)
-    scaler = StandardScaler()
-    num_scaled = scaler.fit_transform(num_features)
+
+    if fit_mode:
+        scaler = StandardScaler().fit(num_features)
+        num_scaled = scaler.transform(num_features)
+    else:
+        num_scaled = scaler.transform(num_features)
 
     email_hash = pd.get_dummies(pd.util.hash_pandas_object(df['P_emaildomain']) % 50, prefix='email')
     card_hash = pd.get_dummies(pd.util.hash_pandas_object(df['card4']) % 20, prefix='card')
 
     features = np.hstack([num_scaled, email_hash, card_hash])
 
-    n_components = min(32, features.shape[1])
-    pca = PCA(n_components=n_components)
-    return torch.tensor(pca.fit_transform(features), dtype=torch.float32)
+    if fit_mode:
+        pca = PCA(n_components=min(32, features.shape[1]))
+        features = pca.fit_transform(features)
+        return torch.tensor(features, dtype=torch.float32), scaler, pca
+    else:
+        features = pca.transform(features)
+        return torch.tensor(features, dtype=torch.float32)
 
 # ----------------------------------------------------------------------------------------------------
 # 3. New: Semantic Similarity Edge Construction (Equation 1)
-def build_semantic_similarity_edges(features, threshold=0.8, batch_size=8192):
+def build_semantic_similarity_edges(features, original_indices, threshold=0.8, batch_size=8192):
     """FAISS-accelerated edge construction"""
     edge_index = []
     num_nodes = features.size(0)
@@ -85,25 +105,29 @@ def build_semantic_similarity_edges(features, threshold=0.8, batch_size=8192):
     # Normalize vectors for cosine similarity
     faiss.normalize_L2(features_np)
     index = faiss.IndexFlatIP(features_np.shape[1])
-
     print("FAISS indexing started")
     index.add(features_np)
 
     for i in range(0, num_nodes, batch_size):
         batch = features_np[i:i+batch_size]
-        similarities, neighbors = index.search(batch, 75)  # Top 75 neighbors
+        similarities, neighbors = index.search(batch, 100)  # Top 100 neighbors
 
         for idx_in_batch, (sim_row, nbr_row) in enumerate(zip(similarities, neighbors)):
-            src = i + idx_in_batch
+            # Map subset index to original dataset index
+            subset_src = i + idx_in_batch
+            original_src = original_indices[subset_src].item()
+            
+            # Filter valid neighbors within threshold
             valid = sim_row > threshold
-            for dst in nbr_row[valid]:
-                if src != dst:
-                    edge_index.append([src, dst])
-                    edge_index.append([dst, src])
+            for subset_dst in nbr_row[valid]:
+                if subset_src != subset_dst:
+                    original_dst = original_indices[subset_dst].item()
+                    edge_index.append([original_src, original_dst])
+                    edge_index.append([original_dst, original_src])
 
     print(f"Generated {len(edge_index)//2} edges (FAISS)")
     if not edge_index:
-        return torch.empty((2, 0), dtype=torch.long)
+        return torch.empty((2, 0), dtype=torch.long).to(features.device)
 
     edge_tensor = torch.tensor(edge_index, dtype=torch.long).t()
     return edge_tensor.unique(dim=1).to(features.device)
@@ -153,7 +177,7 @@ class RLAgent:
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
         self.mces = LiteMCES()
 
-    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=60):
+    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
@@ -164,33 +188,33 @@ class RLAgent:
 
         # Loss tracking
         epoch_losses = []
-        
+
         for epoch in range(n_epochs):
             # Forward pass (batched)
             node_features = features[subset]
             probs, logits = self.policy(node_features)
             actions = torch.multinomial(probs, 1).squeeze()
-            
+
             # Reward calculation
             rewards = []
             for node, action in zip(subset, actions):
                 method_nodes = self.mces._execute_method(node.item(), action)
                 reward = torch.log1p(y_labels[method_nodes].sum().float())  # Normalized reward
                 rewards.append(reward)
-            
+
             rewards = torch.stack(rewards)
-            
+
             # Policy gradient loss
             loss = -(torch.log(probs[range(len(subset)), actions]) * rewards).mean()
-            
+
             # Backward pass
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-            
+
             # Track average loss
             epoch_losses.append(loss.item())
-            
+
             if (epoch+1) % 10 == 0:
                 avg_loss = np.mean(epoch_losses[-10:]) if epoch >= 10 else loss.item()
                 print(f"RL Epoch {epoch+1}: Loss={avg_loss:.4f}, Avg Reward={rewards.mean().item():.4f}")
@@ -208,11 +232,11 @@ class LiteMCES:
     def _precompute_adjacency(self, edge_index):
         """Convert edge_index to dense adjacency list on GPU"""
         num_nodes = edge_index.max().item() + 1
-        
+
         # Initialize padded adjacency matrix
-        self.adj_matrix = torch.full((num_nodes, self.max_neighbors), -1, 
+        self.adj_matrix = torch.full((num_nodes, self.max_neighbors), -1,
                                    dtype=torch.long, device=edge_index.device)
-        
+
         # Get unique neighbors per node
         nodes, counts = torch.unique(edge_index[0], return_counts=True)
         for node, count in zip(nodes, counts):
@@ -265,19 +289,19 @@ class LiteMCES:
         """Batch-add bidirectional edges using tensor operations"""
         if not nodes:
             return
-        
+
         # Convert to tensors on existing device
         node_tensor = torch.tensor([node], device=self.adj_matrix.device)
         nodes_tensor = torch.tensor(nodes, device=self.adj_matrix.device)
-        
+
         # Create bidirectional edges [src, dst] and [dst, src]
         src = torch.cat([node_tensor.expand(len(nodes)), nodes_tensor])
         dst = torch.cat([nodes_tensor, node_tensor.expand(len(nodes))])
-        
+
         # Filter invalid nodes (-1 padding)
         valid_mask = (dst >= 0) & (src >= 0)
         edges = torch.stack([src[valid_mask], dst[valid_mask]], dim=0)
-        
+
         # Extend sub_edges list in-place
         sub_edges.append(edges)
 
@@ -286,22 +310,22 @@ class LiteMCES:
         # Convert list of edge tensors to single tensor
         if not sub_edges:
             return original_edges
-        
+
         device = original_edges.device
         sub_tensors = [e.to(device) for e in sub_edges if e.shape[0] == 2]
-        
+
         if not sub_tensors:
             return original_edges
-        
+
         combined = torch.cat([original_edges] + sub_tensors, dim=1)
         return combined.unique(dim=1)  # Deduplicate on GPU
 
     def _random_walk(self, start_node):
         """Batched random walk using adjacency matrix"""
-        walk = torch.full((self.k_rw,), -1, 
+        walk = torch.full((self.k_rw,), -1,
                         dtype=torch.long, device=self.adj_matrix.device)
         current = torch.as_tensor(start_node, device=self.adj_matrix.device, dtype=torch.long).clone().detach()
-        
+
         for step in range(self.k_rw):
             neighbors = self.adj_matrix[current]
             valid_neighbors = neighbors[neighbors >= 0]
@@ -309,24 +333,24 @@ class LiteMCES:
                 break
             current = valid_neighbors[torch.randint(0, len(valid_neighbors), (1,))]
             walk[step] = current
-            
+
         return walk[walk >= 0].tolist()  # Exclude invalid steps
 
     def _k_hop_neighbors(self, start_node):
         """Vectorized k-hop neighbor finding using adjacency matrix"""
         current_nodes = torch.tensor([start_node], device=self.adj_matrix.device)
-        visited = torch.zeros(self.adj_matrix.size(0), dtype=torch.bool, 
+        visited = torch.zeros(self.adj_matrix.size(0), dtype=torch.bool,
                             device=self.adj_matrix.device)
         visited[start_node] = True
 
         for _ in range(self.k_hop):
             # Get all neighbors of current nodes
             neighbors = self.adj_matrix[current_nodes]  # Shape: [batch, max_neighbors]
-            
+
             # Flatten and remove invalid entries (-1)
             neighbors = neighbors.flatten()
             neighbors = neighbors[neighbors >= 0]
-            
+
             # Deduplicate and mark visited
             new_nodes = neighbors[~visited[neighbors]]
             visited[new_nodes] = True
@@ -345,7 +369,7 @@ class LiteMCES:
             # Get all neighbors of current frontier
             neighbors = self.adj_matrix[queue].flatten()
             neighbors = neighbors[neighbors >= 0]  # Remove padding
-            
+
             # Filter unvisited
             new_nodes = neighbors[~visited[neighbors]]
             visited[new_nodes] = True
@@ -358,12 +382,11 @@ class FraudGNN(nn.Module):
     def __init__(self, in_channels, hidden=64, out=2, dropout=0.4):
         super().__init__()
         self.conv1 = GCNConv(in_channels, hidden)
-        self.bn1 = nn.BatchNorm1d(hidden)
         self.conv2 = GCNConv(hidden, out)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, edge_index):
-        x = F.relu(self.bn1(self.conv1(x, edge_index)))
+        x = F.relu(self.conv1(x, edge_index))
         x = self.dropout(x)
         x = self.conv2(x, edge_index)
         return F.log_softmax(x, dim=1)
@@ -384,105 +407,142 @@ class FocalLoss(nn.Module):
 # ----------------------------------------------------------------------------------------------------
 # 9. Modified Training Pipeline
 def main():
-  # 1. Data Loading & Preprocessing
-    df = load_data(sample_frac=0.1)
+    start_time = time.time()
+    # 1. Data Loading & Preprocessing
+    df = load_data(sample_frac=1.0)
     if df.empty:
         print("No data loaded - check file paths")
         return
 
+    # Stratified split on raw data (before preprocessing)
+    train_idx, temp_idx = train_test_split(
+        df.index, 
+        test_size=0.4, 
+        stratify=df['isFraud'], 
+        random_state=42
+    )
+    val_idx, test_idx = train_test_split(
+        temp_idx, 
+        test_size=0.5, 
+        stratify=df.loc[temp_idx, 'isFraud'], 
+        random_state=42
+    )
+
+    # Split data chronologically (e.g., by TransactionDT)
+    # df = df.sort_values('TransactionDT')
+    # train_idx = df.index[:int(0.6 * len(df))]
+    # val_idx = df.index[int(0.6 * len(df)) : int(0.8 * len(df))]
+    # test_idx = df.index[int(0.8 * len(df)):]
+
+    # Preprocess TRAINING data (fit scalers/PCA)
+    train_features, scaler, pca = preprocess_features(
+        df.loc[train_idx], 
+        fit_mode=True
+    )
+    
+    # Preprocess VAL/TEST data (use training-fitted scalers/PCA)
+    val_features = preprocess_features(
+        df.loc[val_idx], 
+        scaler=scaler, 
+        pca=pca, 
+        fit_mode=False
+    )
+    test_features = preprocess_features(
+        df.loc[test_idx], 
+        scaler=scaler, 
+        pca=pca, 
+        fit_mode=False
+    )
+    
+    # Combine features into full tensor (preserve original indices)
+    features = torch.zeros((len(df), train_features.shape[1]), dtype=torch.float32)
+    features[train_idx] = train_features
+    features[val_idx] = val_features
+    features[test_idx] = test_features
+    
+    # Move to device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # device = torch.device('cpu')
-    features = preprocess_features(df).to(device)
+    features = features.to(device)
     if features.shape[0] == 0:
         print("Feature engineering failed")
         return
 
     ## 2. FAISS-based Edge Construction
-    edge_index = build_semantic_similarity_edges(features, threshold=0.8).to(device)
+    train_features = features[train_idx]  # Shape: [num_train_nodes, feature_dim]
+    original_indices = torch.tensor(train_idx, dtype=torch.long).to(device)  # Maps subset idx → original idx
+    
+    # Build edges ONLY within training subgraph
+    edge_index = build_semantic_similarity_edges(
+        features=train_features,
+        original_indices=original_indices,
+        threshold=0.8
+    )
 
     # 3. Adaptive MCD Initialization
     print("Started Adaptive MCD")
-    fraud_nodes = torch.where(torch.tensor(df['isFraud'].values, device=device) == 1)[0]
-    majority_nodes = torch.where(torch.tensor(df['isFraud'].values, device=device) == 0)[0]
-    fraud_ratio = len(fraud_nodes) / len(df)
+    train_labels = torch.tensor(df.loc[train_idx, 'isFraud'].values, dtype=torch.long).to(device)
+    fraud_nodes_train_local = torch.where(train_labels == 1)[0]
+    majority_nodes_train_local = torch.where(train_labels == 0)[0]
+    fraud_ratio_train = len(fraud_nodes_train_local) / len(train_idx)
 
     mcd = AdaptiveMCD(
-        input_dim=features.size(1),
-        fraud_ratio=fraud_ratio,
-        alpha=0.5  # Tunable hyperparameter
+        input_dim=train_features.size(1),
+        fraud_ratio=fraud_ratio_train,
+        alpha=0.5
     ).to(device)
     optimizer_mcd = torch.optim.Adam(mcd.parameters(), lr=0.001)
 
     # 4. MCD Training
-    for _ in range(10):  # Paper uses 10 epochs
+    for _ in range(10):
         optimizer_mcd.zero_grad()
-        scores = mcd.selector(features[majority_nodes]).squeeze()
+        scores = mcd.selector(train_features[majority_nodes_train_local]).squeeze()
         loss = F.binary_cross_entropy_with_logits(scores, torch.ones_like(scores))
         loss.backward()
         optimizer_mcd.step()
 
     # 5. Downsample Majority Class
     with torch.no_grad():
-        kept_indices = mcd(features[majority_nodes])
-        kept_majority = majority_nodes[kept_indices]
-
-    #  print(f"Kept {len(kept_majority)}/{len(majority_nodes)} majority nodes") !Remove!
+        kept_indices = mcd(train_features[majority_nodes_train_local])
+        kept_majority_local = majority_nodes_train_local[kept_indices]
+        kept_majority_global = torch.tensor(train_idx[kept_indices.cpu().numpy()], device=device)
 
     # 6. RL Subgraph Enhancement
     print("Started MCES")
-    rl_agent = RLAgent(features.size(1))
+    rl_agent = RLAgent(train_features.size(1)).to(device)
     rl_agent.policy.to(device)
-    mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2)
+
+    mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2).to(device)
     enhanced_edges = mces.enhance_subgraph(
         edge_index,
-        fraud_nodes,
-        features,
-        rl_agent=rl_agent,  # RL-enhanced generation
-        y_labels=torch.tensor(df['isFraud'].values, dtype=torch.long).to(device)  # Pass actual labels here
+        fraud_nodes=fraud_nodes_train_local,
+        features=train_features,
+        rl_agent=rl_agent,
+        y_labels=train_labels
     )
 
     # 7. Merge Subgraphs
-    device = edge_index.device
-    combined_nodes = torch.cat([fraud_nodes, kept_majority]).to(device)
+    fraud_nodes_global = torch.tensor(train_idx[fraud_nodes_train_local.cpu().numpy()], device=device)
+    combined_nodes = torch.cat([fraud_nodes_global, kept_majority_global])
 
-    mask = torch.isin(edge_index[0].to(device), combined_nodes) & \
-           torch.isin(edge_index[1].to(device), combined_nodes)
+    mask = torch.isin(edge_index[0], combined_nodes) & \
+           torch.isin(edge_index[1], combined_nodes)
     g4_edges = edge_index[:, mask]
     merged_edges = torch.cat([enhanced_edges, g4_edges], dim=1).unique(dim=1)
-    merged_edges = merged_edges.to(device)
 
     # 8. Data Splits & Masks (your existing implementation)
-    final_nodes = torch.cat([fraud_nodes, kept_majority]).cpu().numpy()
-
-    print("Final Nodes: ", len(final_nodes))
-    print("Kept Majority: ", len(kept_majority))
-    print("Fraud Nodes: ", len(fraud_nodes))
-
-    # Create proper boolean masks
-    train_idx, temp_idx = train_test_split(
-        final_nodes,
-        test_size=0.4,
-        stratify=df['isFraud'].iloc[final_nodes]
-    )
-    val_idx, test_idx = train_test_split(
-        temp_idx,
-        test_size=0.5,
-        stratify=df['isFraud'].iloc[temp_idx]
-    )
-
     num_nodes = features.size(0)
     train_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
     val_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
     test_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
 
-    train_mask[torch.tensor(train_idx, device=device)] = True
-    val_mask[torch.tensor(val_idx, device=device)] = True
-    test_mask[torch.tensor(test_idx, device=device)] = True
+    train_mask[train_idx] = True
+    val_mask[val_idx] = True
+    test_mask[test_idx] = True
 
     # Create Data object with merged edges
     data = Data(
-        x=features.to(device),
-        edge_index=merged_edges.to(device),
+        x=features,
+        edge_index=merged_edges,
         y=torch.tensor(df['isFraud'].values, dtype=torch.long).to(device),
         train_mask=train_mask,
         val_mask=val_mask,
@@ -490,10 +550,12 @@ def main():
     ).to(device)
 
     # 9. Class-Weighted Training
-    fraud_ratio_final = len(fraud_nodes)/len(final_nodes)
+    train_fraud_count = len(fraud_nodes_train_local)  # Local training fraud nodes
+    train_non_fraud_count = len(kept_majority_local)
+    fraud_ratio_final = train_fraud_count / (train_fraud_count + train_non_fraud_count)
     class_weights = torch.tensor([
-        1/(1 - fraud_ratio_final),
-        1/fraud_ratio_final
+        1/(1 - fraud_ratio_final),  # Weight for class 0 (downsampled majority)
+        1/fraud_ratio_final         # Weight for class 1 (training fraud)
     ], dtype=torch.float32).to(device)
 
     # Training with class weights
@@ -549,22 +611,24 @@ def main():
             return
 
         # Safe metric calculation
-        recall = recall = recall_score(y_true, y_pred)
+        recall = recall_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred)
-
-        # Confusion matrix with explicit labels
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+
+        # Calculate G-Mean safely
         tn, fp, fn, tp = cm.ravel()
         tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.0
         gmean = np.sqrt(tpr * tnr) if (tpr > 0 and tnr > 0) else 0.0
 
-
-        print(f"\nFinal Metrics:")
+        print(f"\nFinal Test Metrics:")
         print(f"Recall: {recall:.4f}")
         print(f"F1-Score: {f1:.4f}")
         print(f"G-Means: {gmean:.4f}")
         print(f"Confusion Matrix:\n{cm}")
+
+    end_time = time.time()
+    print(f"Training completed in {time.time() - start_time:.2f} seconds.")
 
 # ----------------------------------------------------------------------------------------------------
 if __name__ == "__main__":
