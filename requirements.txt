@@ -6,4 +6,3 @@ networkx
 torch
 torch-geometric
 faiss-cpu
-faiss-gpu
