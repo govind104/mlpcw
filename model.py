@@ -508,7 +508,7 @@ def main():
 
     # 6. RL Subgraph Enhancement
     print("Started MCES")
-    rl_agent = RLAgent(train_features.size(1)).to(device)
+    rl_agent = RLAgent(train_features.size(1))
     rl_agent.policy.to(device)
 
     mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2).to(device)
