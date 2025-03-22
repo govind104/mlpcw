@@ -201,12 +201,24 @@ class SubgraphPolicy(nn.Module):
         logits = self.actor(x)
         return F.softmax(logits, dim=-1), logits
 
+# 7. GNN Model (Unchanged)
+class RLGNN(nn.Module):
+    def __init__(self, in_channels, hidden=32, out=2):
+        super().__init__()
+        self.conv1 = GCNConv(in_channels, hidden)
+        self.conv2 = GCNConv(hidden, out)
+
+    def forward(self, x, edge_index):
+        x = F.relu(self.conv1(x, edge_index))
+        x = self.conv2(x, edge_index)
+        return F.log_softmax(x, dim=1)
+
 class RLAgent:
     def __init__(self, feat_dim):
         self.policy = SubgraphPolicy(feat_dim)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
         self.mces = LiteMCES()
-        self.gnn_model = FraudGNN(feat_dim)  # Lightweight GNN for reward computation
+        self.gnn_model = RLGNN(feat_dim)  # Lightweight GNN for reward computation
         self.gnn_optimizer = torch.optim.Adam(self.gnn_model.parameters(), lr=0.01)
         self.criterion = FocalLoss()  # Or any other loss function
 
