@@ -516,7 +516,7 @@ def main():
 
     start_time = time.time()
     # 1. Data Loading & Preprocessing
-    train_df, val_df, test_df = load_data(sample_frac=0.05)
+    train_df, val_df, test_df = load_data(sample_frac=0.01)
     if train_df.empty or val_df.empty or test_df.empty:
         print("Data loaded and split incorrectly, please check.")
         print(f"Train DataFrame shape: {train_df.shape}")
