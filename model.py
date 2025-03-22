@@ -44,7 +44,7 @@ def load_data(sample_frac=0.3, random_state=42):
         # Fixed Proportion Split (Train: 60%, Val: 20%, Test: 20%)
         train_end = int(0.6 * len(transactions))  # First 60% for training
         val_end = int(0.8 * len(transactions))    # Next 20% for validation
-        
+
         train_df = transactions.iloc[:train_end]  # First 60%
         val_df = transactions.iloc[train_end:val_end]  # Next 20%
         test_df = transactions.iloc[val_end:]  # Last 20%
@@ -53,12 +53,12 @@ def load_data(sample_frac=0.3, random_state=42):
         fraud_train = train_df[train_df['isFraud'] == 1].sample(frac=sample_frac, random_state=random_state)
         non_fraud_count = int(len(fraud_train) / 0.035 * 0.965)  # Maintain original ratio
         non_fraud_train = train_df[train_df['isFraud'] == 0].sample(n=non_fraud_count, random_state=random_state)
-        
+
         # Combine and shuffle balanced training data
         balanced_train = pd.concat([fraud_train, non_fraud_train]).sample(frac=1, random_state=random_state)
         val_df_sampled = val_df.sample(frac=sample_frac, random_state=random_state)
         test_df_sampled = test_df.sample(frac=sample_frac, random_state=random_state)
-        
+
         return balanced_train.reset_index(drop=True), val_df_sampled.reset_index(drop=True), test_df_sampled.reset_index(drop=True)
 
     except Exception as e:
@@ -133,7 +133,7 @@ def build_semantic_similarity_edges(features, threshold=0.8, split: str = None, 
     edge_index = []
     num_nodes = features.size(0)
     features_np = features.cpu().numpy()
-    
+
     # Normalize vectors for cosine similarity
     faiss.normalize_L2(features_np)
     index = faiss.IndexFlatIP(features_np.shape[1])  # Inner product for cosine similarity
@@ -197,9 +197,14 @@ class SubgraphPolicy(nn.Module):
             nn.Linear(32, 3)  # 3 actions: RW, K-hop, K-ego
         )
 
+        # Initialize weights
+        for layer in self.actor:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)  # Xavier initialization
+                nn.init.zeros_(layer.bias)  # Initialize biases to zero
+
     def forward(self, x):
         logits = self.actor(x)
-        logits = logits - logits.max(dim=-1, keepdim=True).values
         logits = torch.clamp(logits, min=-10, max=10)
         probs = F.softmax(logits, dim=-1)
         return probs, logits
@@ -215,7 +220,12 @@ class RLAgent:
         device = features.device
         y_labels = y_labels.to(device)
         subset = nodes[torch.randperm(len(nodes))[:int(0.2 * len(nodes))]].to(device)
-        
+
+        # Debugging: Print input features and policy network weights
+        print("Node features:", features[subset])
+        for name, param in self.policy.named_parameters():
+            print(f"Policy network parameter {name}: {param}")
+
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
 
@@ -233,9 +243,13 @@ class RLAgent:
         for epoch in range(n_epochs):
             # Forward pass (batched)
             node_features = features[subset]
-            probs, logits = self.policy(node_features)
-            actions = torch.multinomial(probs, 1).squeeze()
+            # Check for invalid values in input features
+            if torch.isnan(node_features).any() or torch.isinf(node_features).any():
+                print("Invalid values in input features tensor!")
+                print("Node features:", node_features)
+                raise ValueError("Input features contain NaN or Inf values.")
 
+            probs, logits = self.policy(node_features)
             # Debugging: Check for invalid values in probs
             if torch.isnan(probs).any() or torch.isinf(probs).any():
                 print("Invalid values in probs tensor!")
@@ -243,11 +257,13 @@ class RLAgent:
                 print("Probs:", probs)
                 raise ValueError("Invalid probabilities detected.")
 
+            actions = torch.multinomial(probs, 1).squeeze()
+
             # Reward calculation
             rewards = []
             train_losses = []
             val_losses = []
-            
+
             for node, action in zip(subset, actions):
                 # Generate subgraph using the chosen method
                 method_nodes = self.mces._execute_method(node.item(), action)
@@ -270,6 +286,7 @@ class RLAgent:
                 out = gnn_model(temp_data.x, temp_data.edge_index)
                 train_loss = criterion(out[temp_data.train_mask], temp_data.y[temp_data.train_mask])
                 train_loss.backward()
+                torch.nn.utils.clip_grad_norm_(gnn_model.parameters(), max_norm=1.0)
                 gnn_optimizer.step()
 
                 # Compute validation loss
@@ -295,6 +312,7 @@ class RLAgent:
             # Backward pass
             self.optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
             self.optimizer.step()
 
             # Track average loss
@@ -305,7 +323,7 @@ class RLAgent:
                 avg_reward = rewards.mean().item()
                 avg_train_loss = np.mean(train_losses)  # Average train loss
                 avg_val_loss = np.mean(val_losses)      # Average validation loss
-        
+
                 # Print train loss, validation loss, and reward
                 print(f"RL Epoch {epoch + 1}: "
                       f"Train Loss={avg_train_loss:.4f}, "
@@ -547,7 +565,7 @@ def main():
     print("Started Adaptive MCD")
     train_labels = torch.tensor(train_df['isFraud'].values, dtype=torch.long).to(device)
     fraud_nodes_train = torch.where(train_labels == 1)[0]
-    majority_nodes_train = torch.where(train_labels == 0)[0]    
+    majority_nodes_train = torch.where(train_labels == 0)[0]
     fraud_ratio = len(fraud_nodes_train) / len(train_labels)
 
     mcd = AdaptiveMCD(
@@ -695,7 +713,7 @@ def main():
         # Safe metric calculation
         recall = recall_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred)
-        
+
         # Confusion matrix with explicit labels
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
         tn, fp, fn, tp = cm.ravel()
