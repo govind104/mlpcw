@@ -221,17 +221,22 @@ class RLAgent:
 
     def compute_reward(self, subgraph_nodes, features, edge_index, y_labels):
         device = features.device
-
+    
+        # Convert subgraph_nodes to a tensor on the same device as edge_index
         subgraph_nodes_tensor = torch.tensor(subgraph_nodes, device=edge_index.device)
     
         # Filter edge_index to include only edges within the subgraph
         mask = torch.isin(edge_index[0], subgraph_nodes_tensor) & torch.isin(edge_index[1], subgraph_nodes_tensor)
         subgraph_edge_index = edge_index[:, mask]
     
+        # Map node indices to a contiguous range [0, num_nodes_in_subgraph - 1]
+        unique_nodes, mapped_indices = torch.unique(subgraph_nodes_tensor, return_inverse=True)
+        subgraph_edge_index = mapped_indices[subgraph_edge_index]
+    
         # Create a subgraph Data object
         subgraph_data = Data(
             x=features[subgraph_nodes],
-            edge_index=subgraph_edge_index,  # Filtered edges
+            edge_index=subgraph_edge_index,  # Filtered and mapped edges
             y=y_labels[subgraph_nodes]
         ).to(device)
     
