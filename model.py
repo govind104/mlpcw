@@ -444,12 +444,18 @@ def main():
     train_df, val_df, test_df = load_data(sample_frac=0.05)
     if train_df.empty or val_df.empty or test_df.empty:
         print("Data loaded and split incorrectly, please check.")
+        print(f"Train DataFrame shape: {train_df.shape}")
+        print(f"Validation DataFrame shape: {val_df.shape}")
+        print(f"Test DataFrame shape: {test_df.shape}")
         return
 
     # device = torch.device('cpu')
     features_train, features_val, features_test, scaler, pca = preprocess_features(train_df, val_df, test_df)
-    if features_train.shape[0] or features_val.shape[0] or features_test.shape[0] == 0:
+    if features_train.shape[0] == 0 or features_val.shape[0] == 0 or features_test.shape[0] == 0:
         print("Feature engineering failed")
+        print(f"Train features shape: {features_train.shape}")
+        print(f"Validation features shape: {features_val.shape}")
+        print(f"Test features shape: {features_test.shape}")
         return
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
