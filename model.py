@@ -206,7 +206,7 @@ class RLAgent:
         self.policy = SubgraphPolicy(feat_dim)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
         self.mces = LiteMCES()
-        self.gnn_model = FraudGNN(feat_dim).to(device)  # Lightweight GNN for reward computation
+        self.gnn_model = FraudGNN(feat_dim)  # Lightweight GNN for reward computation
         self.gnn_optimizer = torch.optim.Adam(self.gnn_model.parameters(), lr=0.01)
         self.criterion = FocalLoss()  # Or any other loss function
 
@@ -219,6 +219,7 @@ class RLAgent:
         ).to(device)
 
         # Train the GNN for 1 epoch
+        self.gnn_model = self.gnn_model.to(features.device)
         self.gnn_model.train()
         self.gnn_optimizer.zero_grad()
         out = self.gnn_model(subgraph_data.x, subgraph_data.edge_index)
