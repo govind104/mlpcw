@@ -200,8 +200,9 @@ class SubgraphPolicy(nn.Module):
     def forward(self, x):
         logits = self.actor(x)
         logits = logits - logits.max(dim=-1, keepdim=True).values
+        logits = torch.clamp(logits, min=-10, max=10)
         probs = F.softmax(logits, dim=-1)
-        return probs logits
+        return probs, logits
 
 class RLAgent:
     def __init__(self, feat_dim):
@@ -225,6 +226,9 @@ class RLAgent:
 
         # Loss tracking
         epoch_losses = []
+        best_avg_reward = -float('inf')
+        patience = 10
+        counter = 0
 
         for epoch in range(n_epochs):
             # Forward pass (batched)
@@ -241,6 +245,9 @@ class RLAgent:
 
             # Reward calculation
             rewards = []
+            train_losses = []
+            val_losses = []
+            
             for node, action in zip(subset, actions):
                 # Generate subgraph using the chosen method
                 method_nodes = self.mces._execute_method(node.item(), action)
@@ -273,8 +280,12 @@ class RLAgent:
 
                 # Reward is the negative of the combined loss (minimize loss = maximize reward)
                 combined_loss = train_loss + val_loss
-                reward = -combined_loss.item()  # Negative loss as reward
+                reward = -combined_loss.item() / 10 # Negative loss as reward
                 rewards.append(reward)
+
+                # Track train and validation losses
+                train_losses.append(train_loss.item())
+                val_losses.append(val_loss.item())
 
             rewards = torch.tensor(rewards, device=device)
 
@@ -291,7 +302,25 @@ class RLAgent:
 
             if (epoch + 1) % 10 == 0:
                 avg_loss = np.mean(epoch_losses[-10:]) if epoch >= 10 else loss.item()
-                print(f"RL Epoch {epoch + 1}: Loss={avg_loss:.4f}, Avg Reward={rewards.mean().item():.4f}")
+                avg_reward = rewards.mean().item()
+                avg_train_loss = np.mean(train_losses)  # Average train loss
+                avg_val_loss = np.mean(val_losses)      # Average validation loss
+        
+                # Print train loss, validation loss, and reward
+                print(f"RL Epoch {epoch + 1}: "
+                      f"Train Loss={avg_train_loss:.4f}, "
+                      f"Val Loss={avg_val_loss:.4f}, "
+                      f"Avg Reward={avg_reward:.4f}")
+
+                # Early stopping
+                if avg_reward > best_avg_reward:
+                    best_avg_reward = avg_reward
+                    counter = 0
+                else:
+                    counter += 1
+                    if counter >= patience:
+                        print("Early stopping RL training.")
+                        break
 
 # ----------------------------------------------------------------------------------------------------
 # 6. Minor-node-centered explored Subgraph (MCES)
