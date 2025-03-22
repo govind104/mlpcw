@@ -7,7 +7,6 @@ import torch.nn.functional as F
 import time
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
-from torch_geometric.utils import add_self_loops
 from sklearn.metrics import recall_score, f1_score, confusion_matrix
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
@@ -202,65 +201,18 @@ class SubgraphPolicy(nn.Module):
         logits = self.actor(x)
         return F.softmax(logits, dim=-1), logits
 
-# 7. GNN Model for RL
-class RLGNN(nn.Module):
-    def __init__(self, in_channels, hidden=16, out=2):
-        super().__init__()
-        self.conv1 = GCNConv(in_channels, out)
-
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        return x
-
 class RLAgent:
     def __init__(self, feat_dim):
         self.policy = SubgraphPolicy(feat_dim)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
         self.mces = LiteMCES()
-        self.gnn_model = RLGNN(feat_dim)  # Lightweight GNN for reward computation
-        self.gnn_optimizer = torch.optim.Adam(self.gnn_model.parameters(), lr=0.01)
-
-    def compute_reward(self, subgraph_nodes, features, edge_index, y_labels):
-        device = features.device
-
-        G = nx.Graph()
-        G.add_edges_from(edge_index.t().cpu().numpy())
-        subgraph = G.subgraph(subgraph_nodes)
-        subgraph_edge_index = torch.tensor(list(subgraph.edges), device=device).t()
-        subgraph_edge_index, _ = add_self_loops(subgraph_edge_index)
-    
-        # Create a subgraph Data object
-        subgraph_data = Data(
-            x=features[subgraph_nodes],
-            edge_index=subgraph_edge_index,  # Filtered and mapped edges
-            y=y_labels[subgraph_nodes]
-        ).to(device)
-    
-        # Train the GNN for 1 epoch
-        self.gnn_model = self.gnn_model.to(device)
-        self.gnn_model.train()
-        self.gnn_optimizer.zero_grad()
-        out = self.gnn_model(subgraph_data.x, subgraph_data.edge_index)
-        loss = F.cross_entropy(out, subgraph_data.y)  # Use cross_entropy with raw logits
-        loss.backward()
-        self.gnn_optimizer.step()
-    
-        # Compute validation loss (optional)
-        self.gnn_model.eval()
-        with torch.no_grad():
-            val_out = self.gnn_model(subgraph_data.x, subgraph_data.edge_index)
-            val_loss = F.cross_entropy(val_out, subgraph_data.y)  # Use cross_entropy with raw logits
-    
-        # Reward is the negative combined loss
-        reward = - (loss.item() + val_loss.item())
-        return reward
 
     def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
-        """Batched RL training with training/validation scores as rewards."""
+        """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
         subset = nodes[torch.randperm(len(nodes))[:int(0.1 * len(nodes))]].to(device)
-
+        
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
 
@@ -277,10 +229,10 @@ class RLAgent:
             rewards = []
             for node, action in zip(subset, actions):
                 method_nodes = self.mces._execute_method(node.item(), action)
-                reward = self.compute_reward(method_nodes, features, edge_index, y_labels)
+                reward = torch.log1p(y_labels[method_nodes].sum().float())  # Normalized reward
                 rewards.append(reward)
 
-            rewards = torch.tensor(rewards, device=device)
+            rewards = torch.stack(rewards)
 
             # Policy gradient loss
             loss = -(torch.log(probs[range(len(subset)), actions]) * rewards).mean()
@@ -491,7 +443,7 @@ def main():
 
     start_time = time.time()
     # 1. Data Loading & Preprocessing
-    train_df, val_df, test_df = load_data(sample_frac=0.01)
+    train_df, val_df, test_df = load_data(sample_frac=0.05)
     if train_df.empty or val_df.empty or test_df.empty:
         print("Data loaded and split incorrectly, please check.")
         print(f"Train DataFrame shape: {train_df.shape}")
