@@ -57,7 +57,9 @@ def load_data(sample_frac=0.3, random_state=42):
         # Combine and shuffle balanced training data
         balanced_train = pd.concat([fraud_train, non_fraud_train]).sample(frac=1, random_state=random_state)
         
-        return balanced_train.reset_index(drop=True), val_df.reset_index(drop=True), test_df.reset_index(drop=True)
+        return balanced_train.reset_index(drop=True), 
+               val_df.sample(frac=sample_frac).reset_index(drop=True), 
+               test_df.sample(frac=sample_frac).reset_index(drop=True)
 
     except Exception as e:
         print(f"Data loading failed: {e}")
@@ -521,8 +523,8 @@ def main():
     print("Fraud Nodes: ", len(fraud_nodes_train))
 
     train_mask = torch.zeros(features_train.size(0), dtype=torch.bool, device=device)
-    val_mask = torch.zeros(features_val.size(0), dtype=torch.bool, device=device)
-    test_mask = torch.zeros(features_test.size(0), dtype=torch.bool, device=device)
+    val_mask = torch.ones(features_val.size(0), dtype=torch.bool, device=device)
+    test_mask = torch.ones(features_test.size(0), dtype=torch.bool, device=device)
 
     train_mask[final_train_nodes] = True  # Final training nodes (fraud + downsampled majority)
     val_mask[:] = True  # All validation nodes are used for validation
@@ -618,10 +620,9 @@ def main():
         # Safe metric calculation
         recall = recall_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred)
-
+        
         # Confusion matrix with explicit labels
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-
         tn, fp, fn, tp = cm.ravel()
         tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.0
