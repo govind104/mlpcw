@@ -223,15 +223,10 @@ class RLAgent:
     def compute_reward(self, subgraph_nodes, features, edge_index, y_labels):
         device = features.device
 
-        subgraph_nodes_tensor = torch.tensor(subgraph_nodes, device=edge_index.device)
-        node_mapping = {node: i for i, node in enumerate(subgraph_nodes)}
-        mask = torch.isin(edge_index[0], subgraph_nodes_tensor) & torch.isin(edge_index[1], subgraph_nodes_tensor)
-        subgraph_edge_index = edge_index[:, mask]
-    
-        subgraph_edge_index = torch.tensor(
-            [[node_mapping[edge_index[0, i].item(), node_mapping[edge_index[1, i].item()] for i in range(subgraph_edge_index.size(1))],
-            device=device
-        ).t()
+        G = nx.Graph()
+        G.add_edges_from(edge_index.t().cpu().numpy())
+        subgraph = G.subgraph(subgraph_nodes)
+        subgraph_edge_index = torch.tensor(list(subgraph.edges), device=device).t()
         subgraph_edge_index, _ = add_self_loops(subgraph_edge_index)
     
         # Create a subgraph Data object
