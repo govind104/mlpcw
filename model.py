@@ -56,10 +56,10 @@ def load_data(sample_frac=0.3, random_state=42):
         
         # Combine and shuffle balanced training data
         balanced_train = pd.concat([fraud_train, non_fraud_train]).sample(frac=1, random_state=random_state)
+        val_df_sampled = val_df.sample(frac=sample_frac, random_state=random_state)
+        test_df_sampled = test_df.sample(frac=sample_frac, random_state=random_state)
         
-        return balanced_train.reset_index(drop=True), 
-               val_df.sample(frac=sample_frac).reset_index(drop=True), 
-               test_df.sample(frac=sample_frac).reset_index(drop=True)
+        return balanced_train.reset_index(drop=True), val_df_sampled.reset_index(drop=True), test_df_sampled.reset_index(drop=True)
 
     except Exception as e:
         print(f"Data loading failed: {e}")
