@@ -216,6 +216,11 @@ class RLAgent:
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
 
+        # Initialize GNN model for temporary training
+        gnn_model = FraudGNN(features.size(1)).to(device)
+        gnn_optimizer = torch.optim.Adam(gnn_model.parameters(), lr=0.001, weight_decay=1e-4)
+        criterion = FocalLoss(alpha=0.25, gamma=2)
+
         # Loss tracking
         epoch_losses = []
 
@@ -228,11 +233,41 @@ class RLAgent:
             # Reward calculation
             rewards = []
             for node, action in zip(subset, actions):
+                # Generate subgraph using the chosen method
                 method_nodes = self.mces._execute_method(node.item(), action)
-                reward = torch.log1p(y_labels[method_nodes].sum().float())  # Normalized reward
+                enhanced_edges = self.mces._add_edges([], node, method_nodes)
+                enhanced_edges = self.mces._finalize_edges(enhanced_edges, edge_index.to(device))
+
+                # Create temporary Data object for GNN training
+                temp_data = Data(
+                    x=features,
+                    edge_index=enhanced_edges,
+                    y=y_labels,
+                    train_mask=torch.zeros(features.size(0), dtype=torch.bool, device=device),
+                    val_mask=torch.zeros(features.size(0), dtype=torch.bool, device=device)
+                )
+                temp_data.train_mask[method_nodes] = True  # Train on the generated subgraph
+
+                # Train GNN model on the enhanced subgraph
+                gnn_model.train()
+                gnn_optimizer.zero_grad()
+                out = gnn_model(temp_data.x, temp_data.edge_index)
+                train_loss = criterion(out[temp_data.train_mask], temp_data.y[temp_data.train_mask])
+                train_loss.backward()
+                gnn_optimizer.step()
+
+                # Compute validation loss
+                gnn_model.eval()
+                with torch.no_grad():
+                    val_out = gnn_model(temp_data.x, temp_data.edge_index)
+                    val_loss = criterion(val_out[temp_data.val_mask], temp_data.y[temp_data.val_mask])
+
+                # Reward is the negative of the combined loss (minimize loss = maximize reward)
+                combined_loss = train_loss + val_loss
+                reward = -combined_loss.item()  # Negative loss as reward
                 rewards.append(reward)
 
-            rewards = torch.stack(rewards)
+            rewards = torch.tensor(rewards, device=device)
 
             # Policy gradient loss
             loss = -(torch.log(probs[range(len(subset)), actions]) * rewards).mean()
@@ -627,7 +662,7 @@ def main():
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
         tn, fp, fn, tp = cm.ravel()
         tpr = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+        tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.
         gmean = np.sqrt(tpr * tnr) if (tpr > 0 and tnr > 0) else 0.0
 
         print(f"\nFinal Metrics:")
