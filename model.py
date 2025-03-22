@@ -221,9 +221,11 @@ class RLAgent:
 
     def compute_reward(self, subgraph_nodes, features, edge_index, y_labels):
         device = features.device
+
+        subgraph_nodes_tensor = torch.tensor(subgraph_nodes, device=edge_index.device)
     
         # Filter edge_index to include only edges within the subgraph
-        mask = torch.isin(edge_index[0], subgraph_nodes) & torch.isin(edge_index[1], subgraph_nodes)
+        mask = torch.isin(edge_index[0], subgraph_nodes_tensor) & torch.isin(edge_index[1], subgraph_nodes_tensor)
         subgraph_edge_index = edge_index[:, mask]
     
         # Create a subgraph Data object
@@ -238,7 +240,7 @@ class RLAgent:
         self.gnn_model.train()
         self.gnn_optimizer.zero_grad()
         out = self.gnn_model(subgraph_data.x, subgraph_data.edge_index)
-        loss = F.cross_entropy(out, subgraph_data.y)
+        loss = F.cross_entropy(out, subgraph_data.y)  # Use cross_entropy with raw logits
         loss.backward()
         self.gnn_optimizer.step()
     
@@ -251,6 +253,7 @@ class RLAgent:
         # Reward is the negative combined loss
         reward = - (loss.item() + val_loss.item())
         return reward
+
 
     def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
         """Batched RL training with training/validation scores as rewards."""
