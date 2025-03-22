@@ -211,6 +211,7 @@ class RLAgent:
         self.criterion = FocalLoss()  # Or any other loss function
 
     def compute_reward(self, subgraph_nodes, features, edge_index, y_labels):
+        device = features.device
         # Create a subgraph Data object
         subgraph_data = Data(
             x=features[subgraph_nodes],
@@ -219,7 +220,7 @@ class RLAgent:
         ).to(device)
 
         # Train the GNN for 1 epoch
-        self.gnn_model = self.gnn_model.to(features.device)
+        self.gnn_model = self.gnn_model.to(device)
         self.gnn_model.train()
         self.gnn_optimizer.zero_grad()
         out = self.gnn_model(subgraph_data.x, subgraph_data.edge_index)
