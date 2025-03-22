@@ -94,7 +94,7 @@ def preprocess_features(train_df, val_df=None, test_df=None):
         if is_train:
             scaler = StandardScaler().fit(num_features)
             num_scaled = scaler.transform(num_features)
-            pca = PCA(n_components=min(32, num_scaled.shape[1])).fit(num_scaled)
+            pca = PCA(n_components=min(64, num_scaled.shape[1])).fit(num_scaled)
         else:
             num_scaled = scaler.transform(num_features)
 
@@ -143,7 +143,7 @@ def build_semantic_similarity_edges(features, threshold=0.8, split: str = None, 
 
     for i in range(0, num_nodes, batch_size):
         batch = features_np[i:i + batch_size]
-        similarities, neighbors = index.search(batch, 100)  # Top 100 neighbors
+        similarities, neighbors = index.search(batch, 250)  # Top 100 neighbors
 
         for idx_in_batch, (sim_row, nbr_row) in enumerate(zip(similarities, neighbors)):
             src = i + idx_in_batch  # Source node index
@@ -199,7 +199,9 @@ class SubgraphPolicy(nn.Module):
 
     def forward(self, x):
         logits = self.actor(x)
-        return F.softmax(logits, dim=-1), logits
+        logits = logits - logits.max(dim=-1, keepdim=True).values
+        probs = F.softmax(logits, dim=-1)
+        return probs logits
 
 class RLAgent:
     def __init__(self, feat_dim):
@@ -207,11 +209,11 @@ class RLAgent:
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
         self.mces = LiteMCES()
 
-    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
+    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=100):
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
-        subset = nodes[torch.randperm(len(nodes))[:int(0.1 * len(nodes))]].to(device)
+        subset = nodes[torch.randperm(len(nodes))[:int(0.2 * len(nodes))]].to(device)
         
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
@@ -229,6 +231,13 @@ class RLAgent:
             node_features = features[subset]
             probs, logits = self.policy(node_features)
             actions = torch.multinomial(probs, 1).squeeze()
+
+            # Debugging: Check for invalid values in probs
+            if torch.isnan(probs).any() or torch.isinf(probs).any():
+                print("Invalid values in probs tensor!")
+                print("Logits:", logits)
+                print("Probs:", probs)
+                raise ValueError("Invalid probabilities detected.")
 
             # Reward calculation
             rewards = []
