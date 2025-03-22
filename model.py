@@ -534,8 +534,8 @@ def main():
         edge_index=merged_edges,
         y=train_labels,
         train_mask=train_mask,
-        val_mask=val_mask,
-        test_mask=test_mask
+        val_mask=torch.zeros(features_train.size(0), dtype=torch.bool, device=device),
+        test_mask=torch.zeros(features_train.size(0), dtype=torch.bool, device=device)
     ).to(device)
 
     # Create Data objects for validation and testing
