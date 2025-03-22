@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import time
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
+from torch_geometric.utils import add_self_loops
 from sklearn.metrics import recall_score, f1_score, confusion_matrix
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
@@ -221,17 +222,17 @@ class RLAgent:
 
     def compute_reward(self, subgraph_nodes, features, edge_index, y_labels):
         device = features.device
-    
-        # Convert subgraph_nodes to a tensor on the same device as edge_index
+
         subgraph_nodes_tensor = torch.tensor(subgraph_nodes, device=edge_index.device)
-    
-        # Filter edge_index to include only edges within the subgraph
+        node_mapping = {node: i for i, node in enumerate(subgraph_nodes)}
         mask = torch.isin(edge_index[0], subgraph_nodes_tensor) & torch.isin(edge_index[1], subgraph_nodes_tensor)
         subgraph_edge_index = edge_index[:, mask]
     
-        # Map node indices to a contiguous range [0, num_nodes_in_subgraph - 1]
-        unique_nodes, mapped_indices = torch.unique(subgraph_nodes_tensor, return_inverse=True)
-        subgraph_edge_index = mapped_indices[subgraph_edge_index]
+        subgraph_edge_index = torch.tensor(
+            [[node_mapping[edge_index[0, i].item(), node_mapping[edge_index[1, i].item()] for i in range(subgraph_edge_index.size(1))],
+            device=device
+        ).t()
+        subgraph_edge_index, _ = add_self_loops(subgraph_edge_index)
     
         # Create a subgraph Data object
         subgraph_data = Data(
@@ -258,7 +259,6 @@ class RLAgent:
         # Reward is the negative combined loss
         reward = - (loss.item() + val_loss.item())
         return reward
-
 
     def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
         """Batched RL training with training/validation scores as rewards."""
