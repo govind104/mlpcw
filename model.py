@@ -201,17 +201,15 @@ class SubgraphPolicy(nn.Module):
         logits = self.actor(x)
         return F.softmax(logits, dim=-1), logits
 
-# 7. GNN Model (Unchanged)
+# 7. GNN Model for RL
 class RLGNN(nn.Module):
-    def __init__(self, in_channels, hidden=32, out=2):
+    def __init__(self, in_channels, hidden=16, out=2):
         super().__init__()
-        self.conv1 = GCNConv(in_channels, hidden)
-        self.conv2 = GCNConv(hidden, out)
+        self.conv1 = GCNConv(in_channels, out)
 
     def forward(self, x, edge_index):
-        x = F.relu(self.conv1(x, edge_index))
-        x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1)
+        x = self.conv1(x, edge_index)
+        return x
 
 class RLAgent:
     def __init__(self, feat_dim):
@@ -220,32 +218,36 @@ class RLAgent:
         self.mces = LiteMCES()
         self.gnn_model = RLGNN(feat_dim)  # Lightweight GNN for reward computation
         self.gnn_optimizer = torch.optim.Adam(self.gnn_model.parameters(), lr=0.01)
-        self.criterion = FocalLoss()  # Or any other loss function
 
     def compute_reward(self, subgraph_nodes, features, edge_index, y_labels):
         device = features.device
+    
+        # Filter edge_index to include only edges within the subgraph
+        mask = torch.isin(edge_index[0], subgraph_nodes) & torch.isin(edge_index[1], subgraph_nodes)
+        subgraph_edge_index = edge_index[:, mask]
+    
         # Create a subgraph Data object
         subgraph_data = Data(
             x=features[subgraph_nodes],
-            edge_index=edge_index,  # Subgraph edges (need to be filtered)
+            edge_index=subgraph_edge_index,  # Filtered edges
             y=y_labels[subgraph_nodes]
         ).to(device)
-
+    
         # Train the GNN for 1 epoch
         self.gnn_model = self.gnn_model.to(device)
         self.gnn_model.train()
         self.gnn_optimizer.zero_grad()
         out = self.gnn_model(subgraph_data.x, subgraph_data.edge_index)
-        loss = self.criterion(out, subgraph_data.y)
+        loss = F.cross_entropy(out, subgraph_data.y)
         loss.backward()
         self.gnn_optimizer.step()
-
+    
         # Compute validation loss (optional)
         self.gnn_model.eval()
         with torch.no_grad():
             val_out = self.gnn_model(subgraph_data.x, subgraph_data.edge_index)
-            val_loss = self.criterion(val_out, subgraph_data.y)
-
+            val_loss = F.cross_entropy(val_out, subgraph_data.y)  # Use cross_entropy with raw logits
+    
         # Reward is the negative combined loss
         reward = - (loss.item() + val_loss.item())
         return reward
