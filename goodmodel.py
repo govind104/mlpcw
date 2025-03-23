@@ -152,14 +152,14 @@ class SubgraphPolicy(nn.Module):
 class RLAgent:
     def __init__(self, feat_dim):
         self.policy = SubgraphPolicy(feat_dim)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.005)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.01)
         self.mces = LiteMCES()
 
     def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
-        subset = nodes[torch.randperm(len(nodes))[:int(0.1*len(nodes))]].to(device)
+        subset = nodes[torch.randperm(len(nodes))[:int(0.5*len(nodes))]].to(device)
 
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
@@ -390,7 +390,7 @@ def main():
 
     start_time = time.time()
   # 1. Data Loading & Preprocessing
-    df = load_data(sample_frac=1.0)
+    df = load_data(sample_frac=0.05)
     if df.empty:
         print("No data loaded - check file paths")
         return
