@@ -460,7 +460,7 @@ def main():
         print(f"Test features shape: {features_test.shape}")
         return
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     features_train = features_train.to(device)
     features_val = features_val.to(device)
     features_test = features_test.to(device)
@@ -568,6 +568,9 @@ def main():
 
     # Training with class weights
     model = FraudGNN(features_train.size(1)).to(device)
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs!")
+        model = nn.DataParallel(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
     criterion = FocalLoss(alpha=0.25, gamma=2, weight=class_weights)
 
