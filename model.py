@@ -128,7 +128,7 @@ def preprocess_features(train_df, val_df=None, test_df=None):
 
 # ----------------------------------------------------------------------------------------------------
 # 3. New: Semantic Similarity Edge Construction (Equation 1)
-def build_semantic_similarity_edges(features, threshold=0.8, split: str = None, batch_size=4096):
+def build_semantic_similarity_edges(features, threshold=0.8, split: str = None, batch_size=2048):
     """FAISS-accelerated edge construction"""
     edge_index = []
     num_nodes = features.size(0)
@@ -440,7 +440,6 @@ class FocalLoss(nn.Module):
 # ----------------------------------------------------------------------------------------------------
 # 9. Modified Training Pipeline
 def main():
-
     start_time = time.time()
     # 1. Data Loading & Preprocessing
     train_df, val_df, test_df = load_data(sample_frac=0.2)
@@ -568,9 +567,6 @@ def main():
 
     # Training with class weights
     model = FraudGNN(features_train.size(1)).to(device)
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs!")
-        model = nn.DataParallel(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
     criterion = FocalLoss(alpha=0.25, gamma=2, weight=class_weights)
 
