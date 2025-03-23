@@ -513,7 +513,11 @@ def main():
     )
 
     # 7. Merge Subgraphs
-    merged_edges = torch.cat([edge_index_train, enhanced_edges], dim=1).unique(dim=1)
+    combined_nodes = torch.cat([fraud_nodes_train, kept_majority]).to(device)
+    mask = torch.isin(edge_index_train[0].to(device), combined_nodes) & \
+           torch.isin(edge_index_train[1].to(device), combined_nodes)
+    g4_edges = edge_index_train[:, mask]
+    merged_edges = torch.cat([enhanced_edges, g4_edges], dim=1).unique(dim=1)
     merged_edges = merged_edges.to(device)
 
     # 8. Data Splits & Masks
