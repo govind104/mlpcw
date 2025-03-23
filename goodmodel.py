@@ -152,7 +152,7 @@ class SubgraphPolicy(nn.Module):
 class RLAgent:
     def __init__(self, feat_dim):
         self.policy = SubgraphPolicy(feat_dim)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.005)
         self.mces = LiteMCES()
 
     def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
