@@ -128,7 +128,7 @@ def preprocess_features(train_df, val_df=None, test_df=None):
 
 # ----------------------------------------------------------------------------------------------------
 # 3. New: Semantic Similarity Edge Construction (Equation 1)
-def build_semantic_similarity_edges(features, threshold=0.8, split: str = None, batch_size=8192):
+def build_semantic_similarity_edges(features, threshold=0.8, split: str = None, batch_size=4096):
     """FAISS-accelerated edge construction"""
     edge_index = []
     num_nodes = features.size(0)
