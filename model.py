@@ -44,7 +44,7 @@ def load_data(sample_frac=0.3, random_state=42):
         # Fixed Proportion Split (Train: 60%, Val: 20%, Test: 20%)
         train_end = int(0.6 * len(transactions))  # First 60% for training
         val_end = int(0.8 * len(transactions))    # Next 20% for validation
-        
+
         train_df = transactions.iloc[:train_end]  # First 60%
         val_df = transactions.iloc[train_end:val_end]  # Next 20%
         test_df = transactions.iloc[val_end:]  # Last 20%
@@ -53,12 +53,12 @@ def load_data(sample_frac=0.3, random_state=42):
         fraud_train = train_df[train_df['isFraud'] == 1].sample(frac=sample_frac, random_state=random_state)
         non_fraud_count = int(len(fraud_train) / 0.035 * 0.965)  # Maintain original ratio
         non_fraud_train = train_df[train_df['isFraud'] == 0].sample(n=non_fraud_count, random_state=random_state)
-        
+
         # Combine and shuffle balanced training data
         balanced_train = pd.concat([fraud_train, non_fraud_train]).sample(frac=1, random_state=random_state)
         val_df_sampled = val_df.sample(frac=sample_frac, random_state=random_state)
         test_df_sampled = test_df.sample(frac=sample_frac, random_state=random_state)
-        
+
         return balanced_train.reset_index(drop=True), val_df_sampled.reset_index(drop=True), test_df_sampled.reset_index(drop=True)
 
     except Exception as e:
@@ -128,12 +128,12 @@ def preprocess_features(train_df, val_df=None, test_df=None):
 
 # ----------------------------------------------------------------------------------------------------
 # 3. New: Semantic Similarity Edge Construction (Equation 1)
-def build_semantic_similarity_edges(features, threshold=0.8, split: str = None, batch_size=2048):
+def build_semantic_similarity_edges(features, threshold=0.8, split: str = None, batch_size=8192):
     """FAISS-accelerated edge construction"""
     edge_index = []
     num_nodes = features.size(0)
     features_np = features.cpu().numpy()
-    
+
     # Normalize vectors for cosine similarity
     faiss.normalize_L2(features_np)
     index = faiss.IndexFlatIP(features_np.shape[1])  # Inner product for cosine similarity
@@ -211,8 +211,8 @@ class RLAgent:
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
-        subset = nodes[torch.randperm(len(nodes))[:int(0.2 * len(nodes))]].to(device)
-        
+        subset = nodes[torch.randperm(len(nodes))[:int(0.5 * len(nodes))]].to(device)
+
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
 
@@ -442,7 +442,7 @@ class FocalLoss(nn.Module):
 def main():
     start_time = time.time()
     # 1. Data Loading & Preprocessing
-    train_df, val_df, test_df = load_data(sample_frac=0.2)
+    train_df, val_df, test_df = load_data(sample_frac=0.1)
     if train_df.empty or val_df.empty or test_df.empty:
         print("Data loaded and split incorrectly, please check.")
         print(f"Train DataFrame shape: {train_df.shape}")
@@ -459,7 +459,7 @@ def main():
         print(f"Test features shape: {features_test.shape}")
         return
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     features_train = features_train.to(device)
     features_val = features_val.to(device)
     features_test = features_test.to(device)
@@ -473,7 +473,7 @@ def main():
     print("Started Adaptive MCD")
     train_labels = torch.tensor(train_df['isFraud'].values, dtype=torch.long).to(device)
     fraud_nodes_train = torch.where(train_labels == 1)[0]
-    majority_nodes_train = torch.where(train_labels == 0)[0]    
+    majority_nodes_train = torch.where(train_labels == 0)[0]
     fraud_ratio = len(fraud_nodes_train) / len(train_labels)
 
     mcd = AdaptiveMCD(
@@ -625,7 +625,7 @@ def main():
         # Safe metric calculation
         recall = recall_score(y_true, y_pred)
         f1 = f1_score(y_true, y_pred)
-        
+
         # Confusion matrix with explicit labels
         cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
         tn, fp, fn, tp = cm.ravel()
