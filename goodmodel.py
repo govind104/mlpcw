@@ -373,16 +373,17 @@ class FraudGNN(nn.Module):
 # ----------------------------------------------------------------------------------------------------
 # 8. Focal Loss
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2):
+    def __init__(self, alpha=0.25, gamma=2, weight=None):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
+        self.weight = weight
 
     def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.weight)
         pt = torch.exp(-ce_loss)
-        return (self.alpha * (1-pt)**self.gamma * ce_loss).mean()
-
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        return focal_loss.mean()
 # ----------------------------------------------------------------------------------------------------
 # 9. Modified Training Pipeline
 def main():
@@ -503,7 +504,7 @@ def main():
     # Training with class weights
     model = FraudGNN(features.size(1)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
-    criterion = FocalLoss(alpha=0.25, gamma=2)
+    criterion = FocalLoss(alpha=0.25, gamma=2, weight=class_weights)
 
     # 10. Training with Early Stopping
     best_val_loss = float('inf')
