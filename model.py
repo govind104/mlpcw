@@ -390,7 +390,7 @@ def main():
 
     start_time = time.time()
   # 1. Data Loading & Preprocessing
-    df = load_data(sample_frac=0.05)
+    df = load_data(sample_frac=0.1)
     if df.empty:
         print("No data loaded - check file paths")
         return
