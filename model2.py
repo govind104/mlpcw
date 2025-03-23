@@ -74,13 +74,13 @@ def preprocess_features(df, scaler=None, pca=None, is_train=False):
     features = np.hstack([num_scaled, email_hash, card_hash])
 
     if is_train:
-        pca = PCA(n_components=min(32, num_scaled.shape[1])).fit(features)
+        pca = PCA(n_components=32).fit(features)
         features = pca.transform(features)
-        return torch.tensor(pca.transform(features), dtype=torch.float32), scaler, pca
+        return torch.tensor(features, dtype=torch.float32), scaler, pca
     else:
         features = pca.transform(features)
-        return torch.tensor(pca.transform(features), dtype=torch.float32)
-    
+        return torch.tensor(features, dtype=torch.float32)
+
 # ----------------------------------------------------------------------------------------------------
 # 3. New: Semantic Similarity Edge Construction (Equation 1)
 def build_semantic_similarity_edges(features, threshold=0.8, batch_size=8192):
@@ -157,7 +157,7 @@ class SubgraphPolicy(nn.Module):
 class RLAgent:
     def __init__(self, feat_dim):
         self.policy = SubgraphPolicy(feat_dim)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.001)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.01)
         self.mces = LiteMCES()
 
     def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
@@ -395,22 +395,25 @@ def main():
 
     start_time = time.time()
   # 1. Data Loading & Preprocessing
-    df = load_data(sample_frac=0.01)
+    df = load_data(sample_frac=0.1)
     if df.empty:
         print("No data loaded - check file paths")
         return
     df = df.sort_values('TransactionDT').reset_index(drop=True)
-    
+
     train_end = int(0.6 * len(df))
     val_end = int(0.8 * len(df))
-    train_df = df.iloc[:train_end]
-    val_df = df.iloc[train_end:val_end]
-    test_df = df.iloc[val_end:]
+    train_df = df.iloc[:train_end].copy()
+    val_df = df.iloc[train_end:val_end].copy()
+    test_df = df.iloc[val_end:].copy()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    features_train, scaler, pca = preprocess_features(train_df, is_train=True).to(device)
-    features_val = preprocess_features(val_df, scaler=scaler, pca=pca).to(device)
-    features_test = preprocess_features(test_df, scaler=scaler, pca=pca).to(device)
+    features_train, scaler, pca = preprocess_features(train_df, is_train=True)
+    features_val = preprocess_features(val_df, scaler=scaler, pca=pca)
+    features_test = preprocess_features(test_df, scaler=scaler, pca=pca)
+    features_train = features_train.to(device)
+    features_val = features_val.to(device)
+    features_test = features_test.to(device)
     if features_train.shape[0] == 0 or features_val.shape[0] == 0 or features_test.shape[0] == 0:
         print("Feature engineering failed")
         return
@@ -479,7 +482,7 @@ def main():
 
     train_mask[:len(train_df)] = True  # First 60%
     val_mask[len(train_df):len(train_df)+len(val_df)] = True  # Next 20%
-    test_mask[len(train_df)+len(val_df):] = True  # Last 20% 
+    test_mask[len(train_df)+len(val_df):] = True  # Last 20%
 
     # Create Data object with merged edges
     data = Data(
