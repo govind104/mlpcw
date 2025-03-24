@@ -16,8 +16,6 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 import matplotlib.pyplot as plt  # Added import
 import networkx as nx  # Added import
 
-DATA_PATH = r"/content/drive/MyDrive/ieee-fraud-detection"
-
 # ----------------------------------------------------------------------------------------------------
 # 1. Memory-Optimized Data Loading (Unchanged)
 def load_data(sample_frac=0.3):
@@ -34,7 +32,7 @@ def load_data(sample_frac=0.3):
 
     try:
         transactions = pd.read_csv(
-            os.path.join(DATA_PATH, 'train_transaction.csv'),
+            'train_transaction.csv',
             dtype=dtypes,
             usecols=list(dtypes.keys())
         )
@@ -162,7 +160,7 @@ class RLAgent:
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
-        subset = nodes[torch.randperm(len(nodes))[:int(0.2*len(nodes))]].to(device)
+        subset = nodes[torch.randperm(len(nodes))[:int(0.1*len(nodes))]].to(device)
 
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
