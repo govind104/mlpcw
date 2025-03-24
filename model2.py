@@ -16,8 +16,6 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 import matplotlib.pyplot as plt  # Added import
 import networkx as nx  # Added import
 
-DATA_PATH = r"/content/drive/MyDrive/ieee-fraud-detection"
-
 # ----------------------------------------------------------------------------------------------------
 # 1. Memory-Optimized Data Loading (Unchanged)
 def load_data(sample_frac=0.3):
@@ -34,7 +32,7 @@ def load_data(sample_frac=0.3):
 
     try:
         transactions = pd.read_csv(
-            os.path.join(DATA_PATH, 'train_transaction.csv'),
+            'train_transaction.csv',
             dtype=dtypes,
             usecols=list(dtypes.keys())
         )
