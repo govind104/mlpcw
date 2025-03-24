@@ -68,7 +68,7 @@ def preprocess_features(df, scaler=None, pca=None, is_train=False):
     if is_train:  # Fit new transformers
         scaler = StandardScaler().fit(num_features)
         num_scaled = scaler.transform(num_features)
-        
+
         features = np.hstack([num_scaled, email_hash, card_hash])
         pca = PCA(n_components=0.95).fit(features)
         return torch.tensor(pca.transform(features), dtype=torch.float32), scaler, pca
@@ -153,14 +153,14 @@ class SubgraphPolicy(nn.Module):
 class RLAgent:
     def __init__(self, feat_dim):
         self.policy = SubgraphPolicy(feat_dim)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.01)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.005)
         self.mces = LiteMCES()
 
-    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
+    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=100):
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
-        subset = nodes[torch.randperm(len(nodes))[:int(0.1*len(nodes))]].to(device)
+        subset = nodes[torch.randperm(len(nodes))[:int(0.2*len(nodes))]].to(device)
 
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
@@ -397,21 +397,34 @@ def main():
         return
 
     df = df.sort_values('TransactionDT').reset_index(drop=True)
-    train_end = int(0.6 * len(df))
-    val_end = int(0.8 * len(df))
+    # Replace your current split with:
+    fraud_df = df[df['isFraud'] == 1]
+    non_fraud_df = df[df['isFraud'] == 0]
 
-    train_df = df.iloc[:train_end].copy()
-    val_df = df.iloc[train_end:val_end].copy()
-    test_df = df.iloc[val_end:].copy()
+    train_df = pd.concat([
+        fraud_df.iloc[:int(0.6*len(fraud_df))],
+        non_fraud_df.iloc[:int(0.6*len(non_fraud_df))]
+    ])
+    val_df = pd.concat([
+        fraud_df.iloc[int(0.6*len(fraud_df)):int(0.8*len(fraud_df))],
+        non_fraud_df.iloc[int(0.6*len(non_fraud_df)):int(0.8*len(non_fraud_df))]
+    ])
+    test_df = pd.concat([
+        fraud_df.iloc[int(0.8*len(fraud_df)):],
+        non_fraud_df.iloc[int(0.8*len(non_fraud_df)):]
+    ])
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     features_train, scaler, pca = preprocess_features(train_df, is_train=True)
+    features_train = features_train.to(device)
     features_val = preprocess_features(val_df, scaler=scaler, pca=pca)
+    features_val = features_val.to(device)
     features_test = preprocess_features(test_df, scaler=scaler, pca=pca)
+    features_test = features_test.to(device)
     if features_train.shape[0] == 0 or features_val.shape[0] == 0 or features_test.shape[0] == 0:
         print("Feature engineering failed")
         return
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     full_features = torch.cat([features_train, features_val, features_test]).to(device)
 
     ## 2. FAISS-based Edge Construction
@@ -448,6 +461,7 @@ def main():
     # 6. RL Subgraph Enhancement
     print("Started MCES")
     val_labels = torch.tensor(val_df['isFraud'].values, dtype=torch.long).to(device)
+    test_labels = torch.tensor(test_df['isFraud'].values, dtype=torch.long).to(device)
     rl_agent = RLAgent(full_features.size(1))
     rl_agent.policy.to(device)
     mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2)
@@ -456,7 +470,7 @@ def main():
         fraud_nodes=torch.where(torch.cat([train_labels, val_labels]) == 1)[0],
         features=full_features,
         rl_agent=rl_agent,  # RL-enhanced generation
-        y_labels=torch.cat([train_df['isFraud'], val_df['isFraud'], test_df['isFraud']]).to(device)
+        y_labels = torch.cat([train_labels, val_labels, test_labels]).to(device)
     )
 
     # 7. Merge Subgraphs
@@ -498,7 +512,7 @@ def main():
 
     train_fraud = data.y[data.train_mask].sum().item()
     train_total = data.train_mask.sum().item()
-    fraud_ratio_final = train_fraud / train_total 
+    fraud_ratio_final = train_fraud / train_total
     class_weights = torch.tensor([
         1/(1 - fraud_ratio_final),
         1/fraud_ratio_final
