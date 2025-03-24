@@ -62,24 +62,20 @@ def preprocess_features(df, scaler=None, pca=None, is_train=False):
     num_cols = ['TransactionAmt', 'C1', 'C2', 'C3', 'TransactionHour', 'TimeSinceLast']
     num_features = df[num_cols].fillna(0)
 
-    if is_train:
-        scaler = StandardScaler().fit(num_features)
-        num_scaled = scaler.transform(num_features)
-    else:
-        num_scaled = scaler.transform(num_features)
-
     email_hash = pd.get_dummies(pd.util.hash_pandas_object(df['P_emaildomain']) % 50, prefix='email')
     card_hash = pd.get_dummies(pd.util.hash_pandas_object(df['card4']) % 20, prefix='card')
 
-    features = np.hstack([num_scaled, email_hash, card_hash])
-
-    if is_train:
-        pca = PCA(n_components=32).fit(features)
-        features = pca.transform(features)
-        return torch.tensor(features, dtype=torch.float32), scaler, pca
-    else:
-        features = pca.transform(features)
-        return torch.tensor(features, dtype=torch.float32)
+    if is_train:  # Fit new transformers
+        scaler = StandardScaler().fit(num_features)
+        num_scaled = scaler.transform(num_features)
+        
+        features = np.hstack([num_scaled, email_hash, card_hash])
+        pca = PCA(n_components=0.95).fit(features)
+        return torch.tensor(pca.transform(features), dtype=torch.float32), scaler, pca
+    else:  # Use existing transformers
+        num_scaled = scaler.transform(num_features)
+        features = np.hstack([num_scaled, email_hash, card_hash])
+        return torch.tensor(pca.transform(features), dtype=torch.float32)
 
 # ----------------------------------------------------------------------------------------------------
 # 3. New: Semantic Similarity Edge Construction (Equation 1)
@@ -399,27 +395,27 @@ def main():
     if df.empty:
         print("No data loaded - check file paths")
         return
-    df = df.sort_values('TransactionDT').reset_index(drop=True)
 
+    df = df.sort_values('TransactionDT').reset_index(drop=True)
     train_end = int(0.6 * len(df))
     val_end = int(0.8 * len(df))
+
     train_df = df.iloc[:train_end].copy()
     val_df = df.iloc[train_end:val_end].copy()
     test_df = df.iloc[val_end:].copy()
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     features_train, scaler, pca = preprocess_features(train_df, is_train=True)
     features_val = preprocess_features(val_df, scaler=scaler, pca=pca)
     features_test = preprocess_features(test_df, scaler=scaler, pca=pca)
-    features_train = features_train.to(device)
-    features_val = features_val.to(device)
-    features_test = features_test.to(device)
     if features_train.shape[0] == 0 or features_val.shape[0] == 0 or features_test.shape[0] == 0:
         print("Feature engineering failed")
         return
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    full_features = torch.cat([features_train, features_val, features_test]).to(device)
+
     ## 2. FAISS-based Edge Construction
-    edge_index = build_semantic_similarity_edges(features_train, threshold=0.8).to(device)
+    edge_index = build_semantic_similarity_edges(full_features, threshold=0.8).to(device)
 
     # 3. Adaptive MCD Initialization
     print("Started Adaptive MCD")
@@ -451,15 +447,16 @@ def main():
 
     # 6. RL Subgraph Enhancement
     print("Started MCES")
-    rl_agent = RLAgent(features_train.size(1))
+    val_labels = torch.tensor(val_df['isFraud'].values, dtype=torch.long).to(device)
+    rl_agent = RLAgent(full_features.size(1))
     rl_agent.policy.to(device)
     mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2)
     enhanced_edges = mces.enhance_subgraph(
         edge_index,
-        fraud_nodes,
-        features_train,
+        fraud_nodes=torch.where(torch.cat([train_labels, val_labels]) == 1)[0],
+        full_features,
         rl_agent=rl_agent,  # RL-enhanced generation
-        y_labels=torch.tensor(df['isFraud'].values, dtype=torch.long).to(device)  # Pass actual labels here
+        y_labels=torch.cat([train_df['isFraud'], val_df['isFraud'], test_df['isFraud']]).to(device)
     )
 
     # 7. Merge Subgraphs
@@ -474,19 +471,18 @@ def main():
     print("Kept Majority: ", len(kept_majority))
     print("Fraud Nodes: ", len(fraud_nodes))
 
-    features_full = torch.cat([features_train, features_val, features_test]).to(device)
-    num_nodes = len(features_full)
+    num_nodes = len(full_features)
     train_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
     val_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
     test_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
 
-    train_mask[:len(train_df)] = True  # First 60%
+    train_mask[:len(features_train)] = True  # First 60%
     val_mask[len(train_df):len(train_df)+len(val_df)] = True  # Next 20%
     test_mask[len(train_df)+len(val_df):] = True  # Last 20%
 
     # Create Data object with merged edges
     data = Data(
-        x=features_full,
+        x=full_features,
         edge_index=merged_edges,
         y=torch.cat([
             torch.tensor(train_df['isFraud'].values, dtype=torch.long),
@@ -499,14 +495,17 @@ def main():
     ).to(device)
 
     # 9. Class-Weighted Training
-    fraud_ratio_final = len(fraud_nodes)/len(combined_nodes)
+
+    train_fraud = data.y[data.train_mask].sum().item()
+    train_total = data.train_mask.sum().item()
+    fraud_ratio_final = train_fraud / train_total 
     class_weights = torch.tensor([
         1/(1 - fraud_ratio_final),
         1/fraud_ratio_final
     ], dtype=torch.float32).to(device)
 
     # Training with class weights
-    model = FraudGNN(features_full.size(1)).to(device)
+    model = FraudGNN(full_features.size(1)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
     criterion = FocalLoss(alpha=0.25, gamma=2, weight=class_weights)
 
