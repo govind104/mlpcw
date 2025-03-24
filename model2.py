@@ -454,7 +454,7 @@ def main():
     enhanced_edges = mces.enhance_subgraph(
         edge_index,
         fraud_nodes=torch.where(torch.cat([train_labels, val_labels]) == 1)[0],
-        full_features,
+        features=full_features,
         rl_agent=rl_agent,  # RL-enhanced generation
         y_labels=torch.cat([train_df['isFraud'], val_df['isFraud'], test_df['isFraud']]).to(device)
     )
