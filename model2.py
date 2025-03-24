@@ -16,6 +16,8 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 import matplotlib.pyplot as plt  # Added import
 import networkx as nx  # Added import
 
+DATA_PATH = r"/content/drive/MyDrive/ieee-fraud-detection"
+
 # ----------------------------------------------------------------------------------------------------
 # 1. Memory-Optimized Data Loading (Unchanged)
 def load_data(sample_frac=0.3):
@@ -32,7 +34,7 @@ def load_data(sample_frac=0.3):
 
     try:
         transactions = pd.read_csv(
-            'train_transaction.csv',
+            os.path.join(DATA_PATH, 'train_transaction.csv'),
             dtype=dtypes,
             usecols=list(dtypes.keys())
         )
@@ -153,10 +155,10 @@ class SubgraphPolicy(nn.Module):
 class RLAgent:
     def __init__(self, feat_dim):
         self.policy = SubgraphPolicy(feat_dim)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.005)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.01)
         self.mces = LiteMCES()
 
-    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=100):
+    def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=50):
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
@@ -390,35 +392,28 @@ class FocalLoss(nn.Module):
 def main():
 
     start_time = time.time()
-  # 1. Data Loading & Preprocessing
-    df = load_data(sample_frac=0.1)
+    # 1. Data Loading & Preprocessing
+    df = load_data(sample_frac=0.01)
     if df.empty:
         print("No data loaded - check file paths")
         return
 
     df = df.sort_values('TransactionDT').reset_index(drop=True)
-    # Replace your current split with:
-    fraud_df = df[df['isFraud'] == 1]
-    non_fraud_df = df[df['isFraud'] == 0]
+    train_end = int(0.6 * len(df))
+    val_end = int(0.8 * len(df))
 
-    train_df = pd.concat([
-        fraud_df.iloc[:int(0.6*len(fraud_df))],
-        non_fraud_df.iloc[:int(0.6*len(non_fraud_df))]
-    ])
-    val_df = pd.concat([
-        fraud_df.iloc[int(0.6*len(fraud_df)):int(0.8*len(fraud_df))],
-        non_fraud_df.iloc[int(0.6*len(non_fraud_df)):int(0.8*len(non_fraud_df))]
-    ])
-    test_df = pd.concat([
-        fraud_df.iloc[int(0.8*len(fraud_df)):],
-        non_fraud_df.iloc[int(0.8*len(non_fraud_df)):]
-    ])
+    train_df = df.iloc[:train_end].copy()
+    val_df = df.iloc[train_end:val_end].copy()
+    test_df = df.iloc[val_end:].copy()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     features_train, scaler, pca = preprocess_features(train_df, is_train=True)
     features_train = features_train.to(device)
+
     features_val = preprocess_features(val_df, scaler=scaler, pca=pca)
     features_val = features_val.to(device)
+
     features_test = preprocess_features(test_df, scaler=scaler, pca=pca)
     features_test = features_test.to(device)
     if features_train.shape[0] == 0 or features_val.shape[0] == 0 or features_test.shape[0] == 0:
@@ -467,7 +462,7 @@ def main():
     mces = LiteMCES(k_rw=10, k_hop=3, k_ego=2)
     enhanced_edges = mces.enhance_subgraph(
         edge_index,
-        fraud_nodes=torch.where(torch.cat([train_labels, val_labels]) == 1)[0],
+        fraud_nodes=torch.where(torch.cat([train_labels, val_labels, test_labels]) == 1)[0],
         features=full_features,
         rl_agent=rl_agent,  # RL-enhanced generation
         y_labels = torch.cat([train_labels, val_labels, test_labels]).to(device)
