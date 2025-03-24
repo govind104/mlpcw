@@ -37,11 +37,11 @@ def load_data(sample_frac=0.3):
             usecols=list(dtypes.keys())
         )
 
-        fraud = transactions[transactions['isFraud'] == 1].sample(frac=sample_frac, random_state=32)
+        fraud = transactions[transactions['isFraud'] == 1].sample(frac=sample_frac, random_state=42)
         non_fraud_count = int(len(fraud)/0.035*0.965)
-        non_fraud = transactions[transactions['isFraud'] == 0].sample(n=non_fraud_count, random_state=32)
+        non_fraud = transactions[transactions['isFraud'] == 0].sample(n=non_fraud_count, random_state=42)
 
-        return pd.concat([fraud, non_fraud]).sample(frac=1, random_state=32).reset_index(drop=True)
+        return pd.concat([fraud, non_fraud]).sample(frac=1, random_state=42).reset_index(drop=True)
 
     except Exception as e:
         print(f"Data loading failed: {e}")
@@ -94,7 +94,7 @@ def build_semantic_similarity_edges(features, threshold=0.8, batch_size=8192):
 
     for i in range(0, num_nodes, batch_size):
         batch = features_np[i:i+batch_size]
-        similarities, neighbors = index.search(batch, 500)  # Top 500 neighbors
+        similarities, neighbors = index.search(batch, 100)  # Top 100 neighbors
 
         for idx_in_batch, (sim_row, nbr_row) in enumerate(zip(similarities, neighbors)):
             src = i + idx_in_batch
@@ -141,9 +141,9 @@ class SubgraphPolicy(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
         self.actor = nn.Sequential(
-            nn.Linear(input_dim, 32),
+            nn.Linear(input_dim, 16),
             nn.ReLU(),
-            nn.Linear(32, 3)  # 3 actions: RW, K-hop, K-ego
+            nn.Linear(16, 3)  # 3 actions: RW, K-hop, K-ego
         )
 
     def forward(self, x):
@@ -153,14 +153,14 @@ class SubgraphPolicy(nn.Module):
 class RLAgent:
     def __init__(self, feat_dim):
         self.policy = SubgraphPolicy(feat_dim)
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.01)
+        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=0.005)
         self.mces = LiteMCES()
 
     def train_rl(self, nodes, features, edge_index, y_labels, n_epochs=100):
         """Batched RL training with average loss tracking"""
         device = features.device
         y_labels = y_labels.to(device)
-        subset = nodes[torch.randperm(len(nodes))[:int(0.1*len(nodes))]].to(device)
+        subset = nodes[torch.randperm(len(nodes))[:int(0.2*len(nodes))]].to(device)
 
         # Precompute adjacency for RLAgent's MCES instance
         self.mces._precompute_adjacency(edge_index.to(device))
@@ -178,7 +178,7 @@ class RLAgent:
             rewards = []
             for node, action in zip(subset, actions):
                 method_nodes = self.mces._execute_method(node.item(), action)
-                reward = torch.log1p(y_labels[method_nodes].sum().float())  # Normalized reward
+                reward = torch.log1p(y_labels[method_nodes].sum().float() * 2.0)  # Normalized reward
                 rewards.append(reward)
 
             rewards = torch.stack(rewards)
@@ -197,6 +197,8 @@ class RLAgent:
             if (epoch+1) % 10 == 0:
                 avg_loss = np.mean(epoch_losses[-10:]) if epoch >= 10 else loss.item()
                 print(f"RL Epoch {epoch+1}: Loss={avg_loss:.4f}, Avg Reward={rewards.mean().item():.4f}")
+
+        self.rl_losses = epoch_losses
 
 # ----------------------------------------------------------------------------------------------------
 # 6. Minor-node-centered explored Subgraph (MCES)
@@ -421,8 +423,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     features_train, scaler, pca = preprocess_features(train_df, is_train=True)
     features_train = features_train.to(device)
+
     features_val = preprocess_features(val_df, scaler=scaler, pca=pca)
     features_val = features_val.to(device)
+
     features_test = preprocess_features(test_df, scaler=scaler, pca=pca)
     features_test = features_test.to(device)
     if features_train.shape[0] == 0 or features_val.shape[0] == 0 or features_test.shape[0] == 0:
@@ -476,6 +480,13 @@ def main():
         rl_agent=rl_agent,  # RL-enhanced generation
         y_labels = torch.cat([train_labels, val_labels, test_labels]).to(device)
     )
+    plt.figure()
+    plt.plot(rl_agent.rl_losses)
+    plt.title('RL Training Loss Across Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.savefig('rl_training_loss.png', bbox_inches='tight')
+    plt.close()
 
     # 7. Merge Subgraphs
     combined_nodes = torch.cat([fraud_nodes, kept_majority]).to(device)
@@ -498,6 +509,8 @@ def main():
     val_mask[len(train_df):len(train_df)+len(val_df)] = True  # Next 20%
     test_mask[len(train_df)+len(val_df):] = True  # Last 20%
 
+    del features_train, features_val, features_test, edge_index, train_labels, mcd, optimizer_mcd, val_labels, test_labels, rl_agent, mces, enhanced_edges, combined_nodes
+
     # Create Data object with merged edges
     data = Data(
         x=full_features,
@@ -518,19 +531,23 @@ def main():
     train_total = data.train_mask.sum().item()
     fraud_ratio_final = train_fraud / train_total
     class_weights = torch.tensor([
-        1/(1 - fraud_ratio_final),
+        1/(1 - fraud_ratio_final) * 2.0,
         1/fraud_ratio_final
     ], dtype=torch.float32).to(device)
 
     # Training with class weights
     model = FraudGNN(full_features.size(1)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
-    criterion = FocalLoss(alpha=0.25, gamma=2, weight=class_weights)
+    criterion = FocalLoss(alpha=0.5, gamma=4, weight=class_weights)
 
     # 10. Training with Early Stopping
     best_val_loss = float('inf')
     patience = 30
     counter = 0
+    train_losses = []
+    val_losses = []
+    val_epochs = []
+
 
     for epoch in range(100):
         model.train()
@@ -539,6 +556,7 @@ def main():
         loss = criterion(out[data.train_mask], data.y[data.train_mask])
         loss.backward()
         optimizer.step()
+        train_losses.append(loss.item())
 
         # Validation Check
         if epoch % 5 == 0:
@@ -546,6 +564,8 @@ def main():
             with torch.no_grad():
                 val_out = model(data.x, data.edge_index)
                 val_loss = criterion(val_out[data.val_mask], data.y[data.val_mask])
+            val_losses.append(val_loss.item())
+            val_epochs.append(epoch)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -559,6 +579,15 @@ def main():
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch+1}: Train Loss {loss.item():.4f} | Val Loss {val_loss.item():.4f}")
 
+    plt.figure()
+    plt.plot(train_losses, label='Training Loss')
+    plt.plot(val_epochs, val_losses, label='Validation Loss', marker='o')
+    plt.title('GNN Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.savefig('gnn_training_validation_loss.png', bbox_inches='tight')
+    plt.close()
 
     # 11. Final Evaluation
     model.eval()
@@ -590,7 +619,6 @@ def main():
         print(f"Recall: {recall:.4f}")
         print(f"F1-Score: {f1:.4f}")
         print(f"G-Means: {gmean:.4f}")
-        print(f"Confusion Matrix:\n{cm}")
 
     end_time = time.time()
     print(f"Training completed in {time.time() - start_time:.2f} seconds.")
