@@ -509,14 +509,14 @@ def main():
     train_total = data.train_mask.sum().item()
     fraud_ratio_final = train_fraud / train_total
     class_weights = torch.tensor([
-        1/(1 - fraud_ratio_final),
-        1/fraud_ratio_final
+        1/(1 - fraud_ratio_final) * 0.5,
+        1/fraud_ratio_final * 2.0
     ], dtype=torch.float32).to(device)
 
     # Training with class weights
     model = FraudGNN(full_features.size(1)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-4)
-    criterion = FocalLoss(alpha=0.25, gamma=2, weight=class_weights)
+    criterion = FocalLoss(alpha=0.5, gamma=4, weight=class_weights)
 
     # 10. Training with Early Stopping
     best_val_loss = float('inf')
